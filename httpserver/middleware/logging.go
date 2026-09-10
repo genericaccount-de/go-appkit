@@ -133,7 +133,7 @@ func (h *loggingHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	h.next.ServeHTTP(wrw, r)
 
 	if !noLog || wrw.Status() >= http.StatusBadRequest {
-		duration := time.Since(startTime)
+		duration := calculateDuration(startTime, lp)
 		if duration >= h.opts.TimeSlotsThreshold {
 			lp.AddTimeSlotDurationInMs("writing_response_ms", wrw.ElapsedTime())
 			lp.fields = append(
@@ -154,6 +154,16 @@ func (h *loggingHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			}, lp.fields...)...,
 		)
 	}
+}
+
+// calculateDuration returns how long the request took, without the time spent
+// in the time slots that were added as excluded (see LoggingParams.AddExcludedTimeSlotInt).
+func calculateDuration(startTime time.Time, lp *LoggingParams) time.Duration {
+	duration := time.Since(startTime)
+	if duration -= lp.excludedDuration(); duration < 0 {
+		return 0 // Excluded time slots may overlap each other and over-subtract.
+	}
+	return duration
 }
 
 func (h *loggingHandler) makeURIToLog(r *http.Request) string {

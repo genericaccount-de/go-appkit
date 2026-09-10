@@ -26,6 +26,7 @@ func (lm loggableIntMap) EncodeLogfObject(e logf.FieldEncoder) error {
 type LoggingParams struct {
 	fields      []log.Field
 	timeSlots   loggableIntMap
+	excludedMs  int64
 	timeSlotsMu sync.RWMutex
 }
 
@@ -36,7 +37,7 @@ func (lp *LoggingParams) ExtendFields(fields ...log.Field) {
 
 // AddTimeSlotInt sets (if new) or adds duration value to the element of the time_slots map
 func (lp *LoggingParams) AddTimeSlotInt(name string, dur int64) {
-	lp.setIntMapFieldValue(name, dur)
+	lp.setIntMapFieldValue(name, dur, false)
 }
 
 // AddTimeSlotDurationInMs sets (if new) or adds duration value in milliseconds to the element of the time_slots map
@@ -44,17 +45,44 @@ func (lp *LoggingParams) AddTimeSlotDurationInMs(name string, dur time.Duration)
 	lp.AddTimeSlotInt(name, dur.Milliseconds())
 }
 
-func (lp *LoggingParams) setIntMapFieldValue(fieldName string, value int64) {
+// AddExcludedTimeSlotInt sets (if new) or adds duration value to the element of the time_slots map.
+// The value is also subtracted from the call duration reported by the logging interceptor,
+// so it doesn't count towards the slow call and time slots thresholds
+// (see WithLoggingSlowCallThreshold and WithLoggingTimeSlotsThreshold).
+func (lp *LoggingParams) AddExcludedTimeSlotInt(name string, dur int64) {
+	lp.setIntMapFieldValue(name, dur, true)
+}
+
+// AddExcludedTimeSlotDurationInMs sets (if new) or adds duration value in milliseconds
+// to the element of the time_slots map.
+// The value is also subtracted from the call duration reported by the logging interceptor,
+// so it doesn't count towards the slow call and time slots thresholds
+// (see WithLoggingSlowCallThreshold and WithLoggingTimeSlotsThreshold).
+func (lp *LoggingParams) AddExcludedTimeSlotDurationInMs(name string, dur time.Duration) {
+	lp.AddExcludedTimeSlotInt(name, dur.Milliseconds())
+}
+
+func (lp *LoggingParams) setIntMapFieldValue(fieldName string, value int64, excluded bool) {
 	lp.timeSlotsMu.Lock()
 	defer lp.timeSlotsMu.Unlock()
 	if lp.timeSlots == nil {
 		lp.timeSlots = make(loggableIntMap, 1)
 	}
 	lp.timeSlots[fieldName] += value
+	if excluded {
+		lp.excludedMs += value
+	}
 }
 
 func (lp *LoggingParams) getTimeSlots() loggableIntMap {
 	lp.timeSlotsMu.RLock()
 	defer lp.timeSlotsMu.RUnlock()
 	return lp.timeSlots
+}
+
+// excludedDuration returns the total duration of the time slots that were added as excluded.
+func (lp *LoggingParams) excludedDuration() time.Duration {
+	lp.timeSlotsMu.RLock()
+	defer lp.timeSlotsMu.RUnlock()
+	return time.Duration(lp.excludedMs) * time.Millisecond
 }

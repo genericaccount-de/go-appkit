@@ -7,6 +7,7 @@ Released under MIT license.
 package interceptor
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -48,6 +49,57 @@ func (s *LoggingParamsTestSuite) TestExtendFields() {
 	s.Require().Len(lp.fields, 4)
 	s.Require().Equal("field4", lp.fields[3].Key)
 	s.Require().Equal("value4", string(lp.fields[3].Bytes))
+}
+
+func (s *LoggingParamsTestSuite) TestExcludedDuration() {
+	s.Run("no time slots at all", func() {
+		lp := &LoggingParams{}
+		s.Require().Zero(lp.excludedDuration())
+	})
+
+	s.Run("only regular time slots", func() {
+		lp := &LoggingParams{}
+		lp.AddTimeSlotInt("slot1", 100)
+		lp.AddTimeSlotDurationInMs("slot2", 2*time.Second)
+		s.Require().Zero(lp.excludedDuration())
+	})
+
+	s.Run("excluded time slots are added to time_slots map too", func() {
+		lp := &LoggingParams{}
+		lp.AddTimeSlotInt("slot1", 100)
+		lp.AddExcludedTimeSlotInt("slot2", 200)
+		lp.AddExcludedTimeSlotDurationInMs("slot3", 300*time.Millisecond)
+
+		s.Require().Equal(loggableIntMap{"slot1": 100, "slot2": 200, "slot3": 300}, lp.getTimeSlots())
+		s.Require().Equal(500*time.Millisecond, lp.excludedDuration())
+	})
+
+	s.Run("same slot added as excluded and not", func() {
+		lp := &LoggingParams{}
+		lp.AddTimeSlotInt("slot1", 100)
+		lp.AddExcludedTimeSlotInt("slot1", 200)
+
+		s.Require().Equal(loggableIntMap{"slot1": 300}, lp.getTimeSlots())
+		s.Require().Equal(200*time.Millisecond, lp.excludedDuration())
+	})
+
+	s.Run("concurrent adding", func() {
+		const goroutines = 32
+		lp := &LoggingParams{}
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := 0; i < goroutines; i++ {
+			go func() {
+				defer wg.Done()
+				lp.AddTimeSlotInt("slot", 1)
+				lp.AddExcludedTimeSlotInt("excluded_slot", 1)
+			}()
+		}
+		wg.Wait()
+
+		s.Require().Equal(loggableIntMap{"slot": goroutines, "excluded_slot": goroutines}, lp.getTimeSlots())
+		s.Require().Equal(goroutines*time.Millisecond, lp.excludedDuration())
+	})
 }
 
 func (s *LoggingParamsTestSuite) TestAddTimeSlotInt() {

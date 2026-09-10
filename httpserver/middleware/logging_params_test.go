@@ -7,6 +7,7 @@ Released under MIT license.
 package middleware
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -59,4 +60,55 @@ func TestLoggingParams_SetTimeSlotDuration(t *testing.T) {
 		},
 	}
 	require.ElementsMatch(t, lp.fields, expected.fields)
+}
+
+func TestLoggingParams_ExcludedDuration(t *testing.T) {
+	t.Run("no time slots at all", func(t *testing.T) {
+		lp := LoggingParams{}
+		require.Zero(t, lp.excludedDuration())
+	})
+
+	t.Run("only regular time slots", func(t *testing.T) {
+		lp := LoggingParams{}
+		lp.AddTimeSlotInt("slot1", 100)
+		lp.AddTimeSlotDurationInMs("slot2", 2*time.Second)
+		require.Zero(t, lp.excludedDuration())
+	})
+
+	t.Run("excluded time slots are added to time_slots map too", func(t *testing.T) {
+		lp := LoggingParams{}
+		lp.AddTimeSlotInt("slot1", 100)
+		lp.AddExcludedTimeSlotInt("slot2", 200)
+		lp.AddExcludedTimeSlotDurationInMs("slot3", 300*time.Millisecond)
+
+		require.Equal(t, loggableIntMap{"slot1": 100, "slot2": 200, "slot3": 300}, lp.getTimeSlots())
+		require.Equal(t, 500*time.Millisecond, lp.excludedDuration())
+	})
+
+	t.Run("same slot added as excluded and not", func(t *testing.T) {
+		lp := LoggingParams{}
+		lp.AddTimeSlotInt("slot1", 100)
+		lp.AddExcludedTimeSlotInt("slot1", 200)
+
+		require.Equal(t, loggableIntMap{"slot1": 300}, lp.getTimeSlots())
+		require.Equal(t, 200*time.Millisecond, lp.excludedDuration())
+	})
+
+	t.Run("concurrent adding", func(t *testing.T) {
+		const goroutines = 32
+		lp := LoggingParams{}
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := 0; i < goroutines; i++ {
+			go func() {
+				defer wg.Done()
+				lp.AddTimeSlotInt("slot", 1)
+				lp.AddExcludedTimeSlotInt("excluded_slot", 1)
+			}()
+		}
+		wg.Wait()
+
+		require.Equal(t, loggableIntMap{"slot": goroutines, "excluded_slot": goroutines}, lp.getTimeSlots())
+		require.Equal(t, goroutines*time.Millisecond, lp.excludedDuration())
+	})
 }

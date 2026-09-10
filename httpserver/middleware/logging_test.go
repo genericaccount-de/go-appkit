@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -289,6 +290,88 @@ func TestLoggingHandler_ServeHTTP_LoggingParams(t *testing.T) {
 
 	requireLogFieldString(t, logEntry, "next_middleware_key_1", "value")
 	requireLogFieldInt(t, logEntry, "next_middleware_key_2", 100500)
+}
+
+func TestLoggingHandler_ServeHTTP_ExcludedTimeSlots(t *testing.T) {
+	const (
+		urlPath          = "/endpoint"
+		requestDuration  = 2 * time.Second
+		slowReqThreshold = 1 * time.Second
+	)
+
+	tests := []struct {
+		Name              string
+		ExcludedSlot      time.Duration
+		WantSlowRequest   bool
+		WantTimeSlots     bool
+		WantDurationMsMin int
+		WantDurationMsMax int
+	}{
+		{
+			Name:              "no excluded time slots, full duration is used",
+			WantSlowRequest:   true,
+			WantTimeSlots:     true,
+			WantDurationMsMin: 2000,
+			WantDurationMsMax: 2500,
+		},
+		{
+			Name:              "excluded time slot drops duration below the thresholds",
+			ExcludedSlot:      1900 * time.Millisecond,
+			WantDurationMsMin: 100,
+			WantDurationMsMax: 600,
+		},
+		{
+			Name:              "excluded time slot is too small to drop duration below the thresholds",
+			ExcludedSlot:      500 * time.Millisecond,
+			WantSlowRequest:   true,
+			WantTimeSlots:     true,
+			WantDurationMsMin: 1500,
+			WantDurationMsMax: 2000,
+		},
+		{
+			Name:              "excluded time slots exceed the request duration, result is clamped to zero",
+			ExcludedSlot:      10 * time.Second,
+			WantDurationMsMin: 0,
+			WantDurationMsMax: 0,
+		},
+	}
+
+	for i := range tests {
+		tt := tests[i]
+		t.Run(tt.Name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+			// Emulate a request that has been processing for requestDuration instead of actually sleeping.
+			req = req.WithContext(NewContextWithRequestStartTime(req.Context(), time.Now().Add(-requestDuration)))
+
+			logger := logtest.NewRecorder()
+			handler := &mockLoggingNextHandler{respStatusCode: http.StatusOK}
+			mw := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					if tt.ExcludedSlot > 0 {
+						GetLoggingParamsFromContext(r.Context()).
+							AddExcludedTimeSlotDurationInMs("external_request_ms", tt.ExcludedSlot)
+					}
+					next.ServeHTTP(rw, r)
+				})
+			}
+			opts := LoggingOpts{SlowRequestThreshold: slowReqThreshold, TimeSlotsThreshold: slowReqThreshold}
+			LoggingWithOpts(logger, opts)(mw(handler)).ServeHTTP(httptest.NewRecorder(), req)
+
+			require.Len(t, logger.Entries(), 1)
+			logEntry := logger.Entries()[0]
+
+			durationField, found := logEntry.FindField("duration_ms")
+			require.True(t, found)
+			require.GreaterOrEqual(t, int(durationField.Int), tt.WantDurationMsMin)
+			require.LessOrEqual(t, int(durationField.Int), tt.WantDurationMsMax)
+
+			_, found = logEntry.FindField("slow_request")
+			require.Equal(t, tt.WantSlowRequest, found)
+
+			_, found = logEntry.FindField("time_slots")
+			require.Equal(t, tt.WantTimeSlots, found)
+		})
+	}
 }
 
 func TestLoggingHandler_ServeHTTP_CustomLogger(t *testing.T) {

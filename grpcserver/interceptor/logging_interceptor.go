@@ -214,7 +214,7 @@ func loggingServerInterceptor(
 	ctx = NewContextWithLoggingParams(NewContextWithLogger(ctx, loggerForNext), lp)
 
 	err := handler(ctx)
-	duration := time.Since(startTime)
+	duration := calculateDuration(startTime, lp)
 
 	grpcCode := status.Code(err)
 	if !noLog || grpcCode != codes.OK { // Log if not excluded or if there's an error
@@ -234,6 +234,16 @@ func loggingServerInterceptor(
 		}
 		logger.Info(fmt.Sprintf("gRPC call finished in %.3fs", duration.Seconds()), append(logFields, lp.fields...)...)
 	}
+}
+
+// calculateDuration returns how long the call took, without the time spent
+// in the time slots that were added as excluded (see LoggingParams.AddExcludedTimeSlotInt).
+func calculateDuration(startTime time.Time, lp *LoggingParams) time.Duration {
+	duration := time.Since(startTime)
+	if duration -= lp.excludedDuration(); duration < 0 {
+		return 0 // Excluded time slots may overlap each other and over-subtract.
+	}
+	return duration
 }
 
 // buildCallInfoLogFields builds the common log fields for both unary and stream interceptors
